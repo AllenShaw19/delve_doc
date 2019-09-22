@@ -69,26 +69,26 @@
 
 1. runtime.main函数调用goroutine 1 
 
-   <img src="D:\WorkSpaces\Go\delve文档\internal\1568524172997.png" alt="1568524172997" style="zoom:67%;" />
+   <img src="1568524172997.png" alt="1568524172997" style="zoom:67%;" />
 
 2. runtine.main 将返回地址压栈，调用main.main函数（即用户写的main包的main函数）
 
-   <img src="D:\WorkSpaces\Go\delve文档\internal\1568524236718.png" alt="1568524236718" style="zoom:67%;" />
+   <img src="1568524236718.png" alt="1568524236718" style="zoom:67%;" />
 
 3. main.main函数将自己的局部变量压栈
 
-   <img src="D:\WorkSpaces\Go\delve文档\internal\1568524092804.png" alt="1568524092804" style="zoom:67%;" />
+   <img src="1568524092804.png" alt="1568524092804" style="zoom:67%;" />
 
 4. 当main.main函数调用其他函数（比如main.f）:
    - 将main.f的参数压栈
 
    - 将返回地址压栈
 
-     <img src="D:\WorkSpaces\Go\delve文档\internal\1568524417914.png" alt="1568524417914" style="zoom:67%;" />
+     <img src="1568524417914.png" alt="1568524417914" style="zoom:67%;" />
 
 5. 最后将main.f的局部变量压栈
 
-   <img src="D:\WorkSpaces\Go\delve文档\internal\1568524536261.png" alt="1568524536261" style="zoom:67%;" />
+   <img src="1568524536261.png" alt="1568524536261" style="zoom:67%;" />
 
 <font color=red>Q:为什么返回地址是在参数与局部变量之间？按理说，应该是发挥地址在栈底，然后是参数，再是局部变量？</font>
 
@@ -121,4 +121,114 @@
   
 
 ## Delve 架构
+
+![1569161238865](1569161238865.png)
+
+### 一个源码级调试器的架构
+
+UI 层： 提供人机交互界面
+
+符号层（Symbolic Layer）：可以获取行号，类型，变量名等
+
+目标层（Target Layer）：控制目标进程，但是对于你的源码一无所知
+
+### 目标层的功能
+
+- 附加（attach）到目标进程，或者从目标进程卸载（detach）
+- 能够枚举处目标进程的所有线程
+- 能够启动/停止独立的线程（或者整个进程）
+- 接收“调试事件(debug events)” （比如线程创建、销毁，还有更重要的线程在断点处停止的事件）
+- 能够读写目标进程的内存
+- 能够读写一个已停止的线程的CPU寄存器
+  - 实际上，这个CPU寄存器的数据保存在系统调度器的线程描述符中	
+
+### Delve的目标层
+
+目标层有3个重要的实现
+
+#### pkg/proc/native
+
+- 通过系统API调用来控制目标进程：
+  - Windows
+    
+    -  WaitForDebugEvent, ContinueDebugEvent, SuspendThread...
+  - Linux
+    
+  	- ptrace, waitpid, tgkill..
+    
+  - macOS
+    
+    - notification/exception ports, ptrace, mach_vm_region…
+  
+- native作为Windows和Linux上的默认后端，macOS则是debugserver
+
+
+#### pkg/proc/core：
+
+- 读取linux_amd64核心文件
+
+#### pkg/proc/gdbserial：
+
+- 用来连接各种调试器服务
+
+  - macOS上的debugserver（macOS上默认启动）
+
+  - lldb-server
+
+  - Mozilla RR（一个<font color=red>时间旅行调试器 ???</font>后端，仅适用于linux / amd64）
+
+    关于TimeTravelDebugger，允许反向调试，主要基于record / replay，不断增量记录程序的当前运行状态，以便事后可以查询并恢复到当时记录的状态。
+
+- gdbserial名称来自它所使用的协议，即Gdb远程串行协议（Gdb Remote Serial Protocol）
+
+- https://sourceware.org/gdb/onlinedocs/gdb/Remote-Protocol.html 
+- https://github.com/llvm-mirror/lldb/blob/master/docs/lldb-gdb-remote.txt
+
+### 关于debugserver
+
+- pkg/proc/gdbserial 连接到debugserver，后者是macOS上的默认目标层
+- 两个原因：
+  	1. 原生后端（native backend）使用未记录的API，并且无法正常工作
+   	2. 原生后端使用的内核API受限制，并且需要签名的可执行文件
+       - 将签名的可执行文件作为开源项目分发是有问题的
+       - 用户自签名过程经常失败
+
+### 符号层
+
+![1569170172035](1569170172035.png)
+
+- 符号层打开可执行文件，读取编译器写入的调试符号
+- Go语言使用的调试符号格式标准是DWARFv4（http://dwarfstd.org/）
+
+### DWARF Sections
+
+DWARF定义了很多Section:
+| debug_info | debug_frame | debug_line |
+|-----|-----|-----|
+| debug_pubnames | debug_ranges | debug_pubtypes |
+| debug_macinfo | debug_types | debug_abbrev |
+| debug_aranges | debug_str | debug_loc |
+
+- debug_line：映射**指令地址**与**文件行号（file：line）**的表
+- debug_frame：栈展开信息
+- debug_info：描述程序中的所有函数，类型和变量
+
+#### debug_info 例子
+
+```go
+package main
+
+type Point struct {
+    X, Y int
+}
+
+func NewPoint(x, y int) Point {
+    p := Point{x, y}
+    return p
+}
+```
+
+生成debug_info如下：
+
+![1569171746855](1569171746855.png)
 
